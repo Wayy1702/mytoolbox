@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ╔══════════════════════════════════════════════════════════╗
-# ║         MY TOOLS BOX v1.0 — Termux Edition              ║
+# ║         Wayy — Termux Edition              ║
 # ║   Auto Launch Android Apps via Deep Link                ║
 # ║   Repo : https://github.com/USERNAME/mytoolbox          ║
 # ╚══════════════════════════════════════════════════════════╝
@@ -93,16 +93,45 @@ confirm() {
 
 open_deeplink() {
     local url="$1"
-    # Coba berbagai metode buka URL di Android via Termux
+    local pkg="$2"   # package name — jika ada, langsung buka tanpa popup
+
+    # ── Jika package name tersedia: paksa buka app tertentu ──
+    if [[ -n "$pkg" ]] && command -v am &>/dev/null; then
+        # Cara 1: am start dengan -p (package) — no chooser dialog
+        am start \
+            -a android.intent.action.VIEW \
+            -d "$url" \
+            -p "$pkg" \
+            --activity-clear-top \
+            &>/dev/null 2>&1
+        local _ret=$?
+        [[ $_ret -eq 0 ]] && return 0
+
+        # Cara 2: am start dengan --package flag (Android 5+)
+        am start \
+            -a android.intent.action.VIEW \
+            -d "$url" \
+            --package "$pkg" \
+            &>/dev/null 2>&1
+        [[ $? -eq 0 ]] && return 0
+    fi
+
+    # ── Fallback jika tidak ada package name ──
+    if command -v am &>/dev/null; then
+        # Tambah flag BROWSABLE + no chooser
+        am start \
+            -a android.intent.action.VIEW \
+            -c android.intent.category.BROWSABLE \
+            -d "$url" \
+            &>/dev/null 2>&1
+        return $?
+    fi
+
     if command -v termux-open-url &>/dev/null; then
         termux-open-url "$url" &>/dev/null 2>&1
         return $?
     fi
-    if command -v am &>/dev/null; then
-        am start -a android.intent.action.VIEW -d "$url" &>/dev/null 2>&1
-        return $?
-    fi
-    # Fallback: xdg-open
+
     xdg-open "$url" &>/dev/null 2>&1
 }
 
@@ -231,24 +260,132 @@ menu_edit() {
     done
 }
 
+# ── AUTO DETECT PACKAGE ─────────────────────────────────────
+_pick_package() {
+    # Fungsi interaktif: cari & pilih package dari daftar terinstall
+    # Return: set variabel _picked_pkg
+
+    _picked_pkg=""
+
+    if ! command -v pm &>/dev/null; then
+        echo -e "${Y}[!] pm tidak tersedia — ketik package name manual.${N}"
+        echo -n "  Package Name: "; read -r _picked_pkg
+        return
+    fi
+
+    echo ""
+    echo -e "${C}[?] Cari package (kosongkan = tampil semua): ${N}"
+    echo -n "  Keyword: "; read -r _kw
+
+    # Ambil daftar package, filter keyword
+    local _pkglist=()
+    while IFS= read -r line; do
+        local pkg="${line#package:}"
+        _pkglist+=("$pkg")
+    done < <(pm list packages 2>/dev/null | grep -i "${_kw:-}" | sort)
+
+    if [[ ${#_pkglist[@]} -eq 0 ]]; then
+        echo -e "${R}[!] Tidak ada package yang cocok.${N}"
+        echo -n "  Ketik manual: "; read -r _picked_pkg
+        return
+    fi
+
+    echo ""
+    echo -e "${Y}── Daftar Package Terinstall ──${N}"
+
+    # Tampilkan dengan paginasi 15 per halaman
+    local _total=${#_pkglist[@]}
+    local _page=0
+    local _per=15
+
+    while true; do
+        local _start=$((_page * _per))
+        local _end=$((_start + _per - 1))
+        [[ $_end -ge $_total ]] && _end=$((_total - 1))
+
+        echo ""
+        for i in $(seq $_start $_end); do
+            printf "  ${C}%3d)${N} %s\n" "$((i+1))" "${_pkglist[$i]}"
+        done
+        echo ""
+
+        local _info="Hal $((_page+1))/$(( (_total+_per-1)/_per )) | Total: $_total"
+        echo -e "${D}$_info${N}"
+        echo -e "  ${W}n${N}) Halaman berikutnya   ${W}p${N}) Sebelumnya"
+        echo -e "  ${W}nomor${N}) Pilih package    ${W}0${N}) Ketik manual"
+        echo ""
+        echo -e "${C}[?] Pilihan: ${N}"
+        read -r _sel
+
+        case "$_sel" in
+            n|N)
+                local _maxpage=$(( (_total+_per-1)/_per - 1 ))
+                [[ $_page -lt $_maxpage ]] && _page=$((_page+1)) || \
+                    echo -e "${Y}[!] Sudah halaman terakhir.${N}"
+                ;;
+            p|P)
+                [[ $_page -gt 0 ]] && _page=$((_page-1)) || \
+                    echo -e "${Y}[!] Sudah halaman pertama.${N}"
+                ;;
+            0)
+                echo -n "  Ketik manual: "; read -r _picked_pkg
+                return
+                ;;
+            ''|*[!0-9]*)
+                echo -e "${R}[!] Input tidak valid.${N}"
+                ;;
+            *)
+                local _idx=$((_sel-1))
+                if [[ $_idx -ge 0 && $_idx -lt $_total ]]; then
+                    _picked_pkg="${_pkglist[$_idx]}"
+                    echo -e "${G}[✓] Dipilih: $_picked_pkg${N}"
+                    sleep 0.5
+                    return
+                else
+                    echo -e "${R}[!] Nomor tidak valid.${N}"
+                fi
+                ;;
+        esac
+    done
+}
+
 _edit_add() {
     echo ""
     echo -e "${Y}── Tambah App Baru ──${N}"
-    echo -n "  Nama App       : "; read -r _name
-    echo -n "  Deep Link/URL  : "; read -r _link
-    echo -n "  Package Name   : "; read -r _pkg
-    echo -e "  ${D}(contoh: com.aplikasi.nama — kosongkan jika tidak tahu)${N}"
+    echo -n "  Nama App      : "; read -r _name
+    echo -n "  Deep Link/URL : "; read -r _link
+
+    echo ""
+    echo -e "${C}[?] Cara isi Package Name:${N}"
+    echo -e "  ${W}1)${N} ${G}Auto detect${N} — pilih dari daftar app terinstall"
+    echo -e "  ${W}2)${N} ${W}Ketik manual${N}"
+    echo -n "  Pilihan (1/2): "; read -r _pmode
+
+    local _pkg=""
+    case "$_pmode" in
+        1)
+            _pick_package
+            _pkg="$_picked_pkg"
+            ;;
+        2|*)
+            echo -n "  Package Name  : "; read -r _pkg
+            ;;
+    esac
 
     if [[ -n "$_name" && -n "$_link" ]]; then
         APP_NAMES+=("$_name")
         APP_LINKS+=("$_link")
         APP_PKGS+=("${_pkg:-}")
         save_apps
-        echo -e "${G}[✓] App '$_name' ditambahkan!${N}"
+        echo ""
+        echo -e "${G}[✓] App ditambahkan!${N}"
+        echo -e "    Nama : $_name"
+        echo -e "    Link : $_link"
+        echo -e "    Pkg  : ${_pkg:-${D}(kosong)${N}}"
     else
         echo -e "${R}[✗] Nama dan link tidak boleh kosong!${N}"
     fi
-    sleep 1
+    sleep 1.5
 }
 
 _edit_delete() {
@@ -279,16 +416,31 @@ _edit_modify() {
         echo -e "  ${D}(kosongkan untuk tidak mengubah)${N}"
         echo -n "  Nama baru [${APP_NAMES[$idx]}]: "; read -r _n
         echo -n "  Link baru [${APP_LINKS[$idx]}]: "; read -r _l
-        echo -n "  Pkg  baru [${APP_PKGS[$idx]}]:  "; read -r _p
+
+        echo ""
+        echo -e "${C}[?] Ubah Package Name${N} ${D}(sekarang: ${APP_PKGS[$idx]:-kosong})${N}"
+        echo -e "  ${W}1)${N} ${G}Auto detect${N} — pilih dari daftar terinstall"
+        echo -e "  ${W}2)${N} ${W}Ketik manual${N}"
+        echo -e "  ${W}3)${N} ${D}Lewati (tidak diubah)${N}"
+        echo -n "  Pilihan (1/2/3): "; read -r _pmode
+
+        local _p="${APP_PKGS[$idx]}"
+        case "$_pmode" in
+            1) _pick_package; _p="$_picked_pkg" ;;
+            2) echo -n "  Package Name: "; read -r _p ;;
+            *) ;;
+        esac
+
         [[ -n "$_n" ]] && APP_NAMES[$idx]="$_n"
         [[ -n "$_l" ]] && APP_LINKS[$idx]="$_l"
-        [[ -n "$_p" ]] && APP_PKGS[$idx]="$_p"
+        APP_PKGS[$idx]="$_p"
         save_apps
         echo -e "${G}[✓] App diperbarui.${N}"
+        echo -e "    Pkg: ${_p:-${D}(kosong)${N}}"
     else
         echo -e "${R}[✗] Nomor tidak valid.${N}"
     fi
-    sleep 1
+    sleep 1.5
 }
 
 _edit_test() {
@@ -298,7 +450,8 @@ _edit_test() {
     if [[ $idx -ge 0 && $idx -lt ${#APP_NAMES[@]} ]]; then
         echo -e "${C}[~] Membuka: ${APP_NAMES[$idx]}${N}"
         echo -e "    Link: ${APP_LINKS[$idx]}"
-        open_deeplink "${APP_LINKS[$idx]}"
+        echo -e "    Pkg : ${APP_PKGS[$idx]:-tidak ada}"
+        open_deeplink "${APP_LINKS[$idx]}" "${APP_PKGS[$idx]:-}"
         echo -e "${G}[✓] Perintah dikirim!${N}"
     fi
     sleep 2
@@ -372,7 +525,7 @@ menu_run() {
             # Buka semua sekaligus di background
             for i in "${!APP_NAMES[@]}"; do
                 echo -e "  ${C}→ Launch: ${W}${APP_NAMES[$i]}${N}"
-                open_deeplink "${APP_LINKS[$i]}" &
+                open_deeplink "${APP_LINKS[$i]}" "${APP_PKGS[$i]:-}" &
                 log_event "Launch (parallel): ${APP_NAMES[$i]}"
             done
             wait
@@ -383,7 +536,7 @@ menu_run() {
             for i in "${!APP_NAMES[@]}"; do
                 echo -e "  ${C}[→] ${W}${APP_NAMES[$i]}${N}"
                 echo -e "       ${D}${APP_LINKS[$i]}${N}"
-                open_deeplink "${APP_LINKS[$i]}"
+                open_deeplink "${APP_LINKS[$i]}" "${APP_PKGS[$i]:-}"
                 log_event "Launch: ${APP_NAMES[$i]}"
 
                 if [[ $i -lt $((${#APP_NAMES[@]}-1)) ]]; then
