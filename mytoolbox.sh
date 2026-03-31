@@ -210,6 +210,36 @@ open_app() {
 }
 
 # ═══════════════════════════════════════════════════════════
+#  GET PIDS — ambil semua PID untuk package tertentu
+# ═══════════════════════════════════════════════════════════
+get_pids() {
+    local _pkg="$1" _pids=""
+    # Metode 1: /proc scan
+    for _f in /proc/[0-9]*/cmdline; do
+        local _cmd
+        _cmd=$(cat "$_f" 2>/dev/null | tr '\0' '\n' | head -1)
+        if [[ "$_cmd" == "$_pkg" || "$_cmd" == "${_pkg}:"* ]]; then
+            local _pid="${_f%/cmdline}"; _pid="${_pid#/proc/}"
+            _pids+="$_pid"$'\n'
+        fi
+    done
+    # Metode 2: ps fallback
+    if [[ -z "$_pids" ]] && command -v ps &>/dev/null; then
+        _pids=$(ps -A 2>/dev/null | awk -v p="$_pkg" '$0 ~ p {print $2}')
+        [[ -z "$_pids" ]] && _pids=$(ps 2>/dev/null | awk -v p="$_pkg" '$0 ~ p {print $1}')
+    fi
+    echo "$_pids"
+}
+
+# Cek apakah PID spesifik masih hidup
+pid_alive() {
+    local _pid="$1"
+    [[ -z "$_pid" ]] && return 1
+    [[ -d "/proc/$_pid" ]] && return 0
+    return 1
+}
+
+# ═══════════════════════════════════════════════════════════
 #  IS RUNNING — metode reliable di Termux tanpa root
 # ═══════════════════════════════════════════════════════════
 is_running() {
@@ -751,11 +781,7 @@ menu_run() {
         enter; return
     fi
 
-    # CHECK_INTERVAL sekarang = detik antar cek (bukan menit)
-    # Default 3 detik jika belum diset ulang
     local _CHECK_SEC="${CHECK_INTERVAL}"
-    # Jika nilai lama masih dalam satuan menit (≥10), konversi supaya tetap wajar
-    # User bisa set ulang dari Settings. Kita pakai nilai apa adanya sebagai detik.
     [[ $_CHECK_SEC -lt 1 ]] && _CHECK_SEC=3
 
     echo -e "${Y}  [↺] Monitor FC aktif — relaunch LANGSUNG saat app keluar${N}"
@@ -765,10 +791,10 @@ menu_run() {
     _launch_all
     echo ""
 
-    # Tunggu semua app startup sebelum mulai monitor
-    local _STARTUP=$(( LAUNCH_DELAY + 5 ))
+    # Tunggu semua app startup dulu sebelum ambil PID
+    local _STARTUP=$(( LAUNCH_DELAY + 8 ))
     [[ $_STARTUP -lt 10 ]] && _STARTUP=10
-    echo -e "${D}  [~] Tunggu startup app (${_STARTUP}s)...${N}"
+    echo -e "${D}  [~] Tunggu startup app (${_STARTUP}s) sebelum monitor...${N}"
     sleep "$_STARTUP"
 
     _STOP=false
@@ -781,64 +807,101 @@ menu_run() {
     ' INT TERM
 
     local _fc_total=0
-    declare -A _last_launch
+    # PID utama per-app (string, bisa kosong kalau package kosong)
+    declare -A _app_pid
     declare -A _was_running
 
-    local _now
-    _now=$(date +%s)
+    # Snapshot PID awal tiap app setelah startup
+    echo -e "${D}  [~] Snapshot PID awal...${N}"
     for i in "${!APP_NAMES[@]}"; do
-        _last_launch[$i]=$_now
-        _was_running[$i]="true"   # anggap sudah running setelah startup
+        local _pkg="${APP_PKGS[$i]}"
+        if [[ -z "$_pkg" ]]; then
+            _app_pid[$i]=""
+            _was_running[$i]="skip"
+            continue
+        fi
+        # Ambil PID terbaru (angka terbesar = proses paling baru)
+        local _pids
+        _pids=$(get_pids "$_pkg" | tr -s '\n' ' ' | xargs)
+        local _pid
+        _pid=$(echo "$_pids" | tr ' ' '\n' | sort -n | tail -1)
+        _app_pid[$i]="$_pid"
+        if [[ -n "$_pid" ]]; then
+            _was_running[$i]="true"
+            echo -e "  ${G}[PID]${N} ${W}${APP_NAMES[$i]}${N} → PID ${C}${_pid}${N}"
+        else
+            _was_running[$i]="nopackage"
+            echo -e "  ${Y}[!]${N}  ${W}${APP_NAMES[$i]}${N} PID tidak ditemukan (package mungkin belum launch)"
+        fi
     done
 
-    # Cooldown setelah relaunch = waktu startup app (minimal 15 detik)
-    local _COOLDOWN=$(( LAUNCH_DELAY + 15 ))
-    [[ $_COOLDOWN -lt 15 ]] && _COOLDOWN=15
-
-    echo -e "${G}  [✓] Monitoring aktif — deteksi FC instan${N}"
     echo ""
+    echo -e "${G}  [✓] Monitoring aktif — tiap app dipantau via PID uniknya${N}"
+    echo ""
+
+    # Cooldown setelah relaunch sebelum ambil PID baru
+    local _COOLDOWN=$(( LAUNCH_DELAY + 12 ))
+    [[ $_COOLDOWN -lt 12 ]] && _COOLDOWN=12
+    declare -A _last_relaunch
 
     while [[ "$_STOP" != "true" ]]; do
         sleep "$_CHECK_SEC"
         [[ "$_STOP" == "true" ]] && break
 
+        local _now
         _now=$(date +%s)
 
         for i in "${!APP_NAMES[@]}"; do
             local _pkg="${APP_PKGS[$i]}"
             [[ -z "$_pkg" ]] && continue
+            [[ "${_was_running[$i]}" == "skip" ]] && continue
 
-            local _elapsed=$(( _now - ${_last_launch[$i]:-0} ))
+            local _pid="${_app_pid[$i]}"
 
-            # Masih dalam cooldown setelah (re)launch → skip dulu
-            if [[ $_elapsed -lt $_COOLDOWN ]]; then
+            # Masih cooldown setelah relaunch → tunggu dulu ambil PID baru
+            local _elapsed=$(( _now - ${_last_relaunch[$i]:-0} ))
+            if [[ "${_was_running[$i]}" == "wait" ]]; then
+                if [[ $_elapsed -lt $_COOLDOWN ]]; then
+                    continue
+                fi
+                # Cooldown habis → coba ambil PID baru
+                local _newpids
+                _newpids=$(get_pids "$_pkg" | tr -s '\n' ' ' | xargs)
+                local _newpid
+                _newpid=$(echo "$_newpids" | tr ' ' '\n' | sort -n | tail -1)
+                if [[ -n "$_newpid" ]]; then
+                    _app_pid[$i]="$_newpid"
+                    _was_running[$i]="true"
+                    echo -e "  ${G}[OK]${N}  ${W}${APP_NAMES[$i]}${N} running kembali — PID ${C}${_newpid}${N}"
+                else
+                    # Belum running, coba relaunch lagi
+                    echo -e "${R}  [retry]${N} ${W}${APP_NAMES[$i]}${N} belum running → coba lagi..."
+                    _launch_one "$i"
+                    _last_relaunch[$i]=$(date +%s)
+                fi
                 continue
             fi
 
-            local _running_now
-            is_running "$_pkg" && _running_now="true" || _running_now="false"
+            # Cek PID masih hidup
+            local _alive=false
+            if [[ -n "$_pid" ]] && pid_alive "$_pid"; then
+                _alive=true
+            fi
 
-            if [[ "$_running_now" == "true" ]]; then
-                # App running normal — update state
-                if [[ "${_was_running[$i]}" != "true" ]]; then
-                    echo -e "  ${G}[OK]${N}  ${W}${APP_NAMES[$i]}${N} ${D}sudah running kembali${N}"
-                fi
+            if [[ "$_alive" == "true" ]]; then
+                # App masih running — tidak perlu lakukan apa-apa (silent)
                 _was_running[$i]="true"
             else
-                if [[ "${_was_running[$i]}" == "true" ]]; then
-                    # Barusan running → sekarang tidak → FC / ditutup!
+                if [[ "${_was_running[$i]}" == "true" || "${_was_running[$i]}" == "nopackage" ]]; then
+                    # PID mati = app FC / ditutup → relaunch HANYA app ini
                     _fc_total=$((_fc_total + 1))
                     echo -e "${Y}  [FC#${_fc_total}]${N} ${W}${APP_NAMES[$i]}${N} ${C}[${APP_OWNERS[$i]:-—}]${N} ${R}keluar!${N} → relaunch sekarang..."
-                    echo -e "       ${D}$(date '+%H:%M:%S')${N}"
+                    echo -e "       ${D}$(date '+%H:%M:%S') | PID lama: ${_pid:-?}${N}"
                     _launch_one "$i"
-                    _last_launch[$i]=$(date +%s)
+                    _app_pid[$i]=""
+                    _last_relaunch[$i]=$(date +%s)
                     _was_running[$i]="wait"
-                    log_write "FC relaunch: ${APP_NAMES[$i]} (FC#${_fc_total})"
-                elif [[ "${_was_running[$i]}" == "wait" ]]; then
-                    # Sudah direlaunch tapi belum running → coba lagi setelah cooldown
-                    echo -e "${R}  [retry]${N} ${W}${APP_NAMES[$i]}${N} belum running → coba lagi..."
-                    _launch_one "$i"
-                    _last_launch[$i]=$(date +%s)
+                    log_write "FC relaunch: ${APP_NAMES[$i]} (FC#${_fc_total}, PID lama: ${_pid:-?})"
                 fi
             fi
         done
