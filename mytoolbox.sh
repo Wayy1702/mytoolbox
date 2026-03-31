@@ -210,33 +210,59 @@ open_app() {
 }
 
 # ═══════════════════════════════════════════════════════════
-#  IS RUNNING
+#  IS RUNNING — metode reliable di Termux tanpa root
 # ═══════════════════════════════════════════════════════════
 is_running() {
     local _pkg="$1"
     [[ -z "$_pkg" ]] && return 1
 
+    # ── Metode 1: dumpsys activity tasks ──────────────────
     if command -v dumpsys &>/dev/null; then
-        local _out
-        _out=$(dumpsys activity processes 2>/dev/null)
-        echo "$_out" | grep -q "ProcessRecord.*$_pkg" && return 0
-        _out=$(dumpsys activity recents 2>/dev/null)
-        echo "$_out" | grep -q "$_pkg" && return 0
+        local _tasks
+        _tasks=$(dumpsys activity tasks 2>/dev/null)
+        if echo "$_tasks" | grep -q "$_pkg"; then
+            return 0
+        fi
+
+        local _svc
+        _svc=$(dumpsys activity services 2>/dev/null)
+        if echo "$_svc" | grep -q "$_pkg"; then
+            return 0
+        fi
     fi
 
-    grep -rl "^$_pkg" /proc/*/cmdline 2>/dev/null | head -1 | grep -q . && return 0
+    # ── Metode 2: /proc scan cmdline per proses ───────────
+    local _found=false
+    for _cmdfile in /proc/[0-9]*/cmdline; do
+        local _cmd
+        _cmd=$(cat "$_cmdfile" 2>/dev/null | tr '\0' '\n' | head -1)
+        if [[ "$_cmd" == "$_pkg" || "$_cmd" == "${_pkg}:"* ]]; then
+            _found=true
+            break
+        fi
+    done
+    [[ "$_found" == "true" ]] && return 0
 
-    if command -v pidof &>/dev/null; then
-        pidof "$_pkg" >/dev/null 2>&1 && return 0
+    # ── Metode 3: ps ──────────────────────────────────────
+    if command -v ps &>/dev/null; then
+        ps -A 2>/dev/null | grep -v grep | grep -q "$_pkg" && return 0
+        ps 2>/dev/null | grep -v grep | grep -q "$_pkg" && return 0
     fi
 
+    # ── Metode 4: dumpsys package stopped flag ────────────
     if command -v dumpsys &>/dev/null; then
-        local _state
-        _state=$(dumpsys package "$_pkg" 2>/dev/null | grep "stopped=" | head -1)
-        echo "$_state" | grep -q "stopped=true" && return 1
-        return 0
+        local _pkg_info
+        _pkg_info=$(dumpsys package "$_pkg" 2>/dev/null)
+        echo "$_pkg_info" | grep -q "Unable to find" && return 1
+        local _stopped
+        _stopped=$(echo "$_pkg_info" | grep "stopped=" | head -1)
+        if [[ -n "$_stopped" ]]; then
+            echo "$_stopped" | grep -q "stopped=true" && return 1
+            return 0
+        fi
     fi
 
+    # Fallback: anggap TIDAK running → rejoin tetap terjadi
     return 1
 }
 
@@ -755,39 +781,58 @@ menu_run() {
         _was_running[$i]="true"
     done
 
-    local _COOLDOWN=60
+    # Cooldown = LAUNCH_DELAY + 30 detik buffer startup app
+    local _COOLDOWN=$(( LAUNCH_DELAY + 30 ))
+    [[ $_COOLDOWN -lt 30 ]] && _COOLDOWN=30
 
     echo -e "${G}  [✓] Monitoring aktif...${N}"
+    echo -e "${D}  Cooldown setelah launch: ${_COOLDOWN}s${N}"
     echo ""
 
     while true; do
         sleep $(( CHECK_INTERVAL * 60 ))
 
         _now=$(date +%s)
+        echo -e "${D}  [~] Cek status — $(date '+%H:%M:%S')${N}"
 
         for i in "${!APP_NAMES[@]}"; do
             local _pkg="${APP_PKGS[$i]}"
             [[ -z "$_pkg" ]] && continue
 
             local _elapsed=$(( _now - ${_last_launch[$i]:-0} ))
-            [[ $_elapsed -lt $_COOLDOWN ]] && continue
+
+            # Masih cooldown setelah launch → skip
+            if [[ $_elapsed -lt $_COOLDOWN ]]; then
+                echo -e "  ${D}[cooldown] ${APP_NAMES[$i]} (${_elapsed}s < ${_COOLDOWN}s)${N}"
+                continue
+            fi
 
             local _running_now
             is_running "$_pkg" && _running_now="true" || _running_now="false"
 
-            if [[ "$_running_now" == "false" ]]; then
+            if [[ "$_running_now" == "true" ]]; then
+                echo -e "  ${G}[OK]${N} ${W}${APP_NAMES[$i]}${N} ${D}running${N}"
+                _was_running[$i]="true"
+            else
                 if [[ "${_was_running[$i]}" == "true" ]]; then
+                    # Sebelumnya running → sekarang tidak → FC nyata
                     _fc_total=$((_fc_total + 1))
-                    echo -e "${Y}  [FC#${_fc_total}]${N} ${W}${APP_NAMES[$i]}${N} ${D}[${APP_OWNERS[$i]:-—}]${N} ${R}force close${N} → relaunch..."
+                    echo -e "${Y}  [FC#${_fc_total}]${N} ${W}${APP_NAMES[$i]}${N} ${D}[${APP_OWNERS[$i]:-—}]${N} ${R}FC!${N} → relaunch..."
                     echo -e "        ${D}$(date '+%H:%M:%S')${N}"
                     _launch_one "$i"
                     _last_launch[$i]=$(date +%s)
-                    _was_running[$i]="false"
+                    _was_running[$i]="wait"
+                elif [[ "${_was_running[$i]}" == "wait" ]]; then
+                    # Masih belum running setelah relaunch → coba lagi
+                    echo -e "${R}  [retry]${N} ${W}${APP_NAMES[$i]}${N} belum running → coba lagi..."
+                    _launch_one "$i"
+                    _last_launch[$i]=$(date +%s)
+                else
+                    echo -e "  ${D}[FC]${N} ${W}${APP_NAMES[$i]}${N} ${D}tidak running${N}"
                 fi
-            else
-                _was_running[$i]="true"
             fi
         done
+        echo ""
     done
 }
 
