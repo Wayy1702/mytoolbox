@@ -392,9 +392,9 @@ menu_setup() {
     echo ""
 
     if [[ "$AUTO_REJOIN" == "true" ]]; then
-        echo -e "  ${C}[5]${N} Interval cek Force Close (menit)"
-        echo -e "      ${D}Sekarang: ${W}${CHECK_INTERVAL} menit${N}"
-        echo -e "      ${D}Semakin kecil = semakin cepat deteksi FC.${N}"
+        echo -e "  ${C}[5]${N} Interval cek FC (detik)"
+        echo -e "      ${D}Sekarang: ${W}${CHECK_INTERVAL} detik${N}"
+        echo -e "      ${D}Rekomendasi: 3–10 detik. Makin kecil = makin cepat deteksi.${N}"
         echo -ne "      → "; read -r _i; [[ "$_i" =~ ^[0-9]+$ ]] && CHECK_INTERVAL="$_i"
         echo ""
     fi
@@ -701,7 +701,7 @@ menu_run() {
     echo -e "  Mode          : ${C}${LAUNCH_MODE}${N}"
     echo -e "  Delay         : ${C}${LAUNCH_DELAY}s${N}"
     if [[ "$AUTO_REJOIN" == "true" ]]; then
-        echo -e "  Auto Rejoin FC: ${G}ON${N} ${D}(cek tiap ${CHECK_INTERVAL} menit)${N}"
+        echo -e "  Auto Rejoin FC: ${G}ON${N} ${D}(cek tiap ${CHECK_INTERVAL} detik — relaunch instan)${N}"
     else
         echo -e "  Auto Rejoin FC: ${R}OFF${N}"
     fi
@@ -751,23 +751,33 @@ menu_run() {
         enter; return
     fi
 
-    echo -e "${Y}  [↺] Monitor Force Close aktif — cek tiap ${CHECK_INTERVAL} menit${N}"
-    echo -e "${R}  Ctrl+C untuk menghentikan.${N}"
+    # CHECK_INTERVAL sekarang = detik antar cek (bukan menit)
+    # Default 3 detik jika belum diset ulang
+    local _CHECK_SEC="${CHECK_INTERVAL}"
+    # Jika nilai lama masih dalam satuan menit (≥10), konversi supaya tetap wajar
+    # User bisa set ulang dari Settings. Kita pakai nilai apa adanya sebagai detik.
+    [[ $_CHECK_SEC -lt 1 ]] && _CHECK_SEC=3
+
+    echo -e "${Y}  [↺] Monitor FC aktif — relaunch LANGSUNG saat app keluar${N}"
+    echo -e "${D}  Cek tiap ${_CHECK_SEC} detik. Ctrl+C untuk hentikan.${N}"
     echo ""
 
     _launch_all
     echo ""
 
-    echo -e "${D}  [~] Tunggu app startup (${LAUNCH_DELAY}s)...${N}"
-    sleep "$LAUNCH_DELAY"
+    # Tunggu semua app startup sebelum mulai monitor
+    local _STARTUP=$(( LAUNCH_DELAY + 5 ))
+    [[ $_STARTUP -lt 10 ]] && _STARTUP=10
+    echo -e "${D}  [~] Tunggu startup app (${_STARTUP}s)...${N}"
+    sleep "$_STARTUP"
 
+    _STOP=false
     trap '
+        _STOP=true
         echo ""
         echo -e "${R}  [■] Monitoring dihentikan.${N}"
         log_write "Auto rejoin dihentikan"
         trap - INT TERM
-        enter
-        return
     ' INT TERM
 
     local _fc_total=0
@@ -778,22 +788,21 @@ menu_run() {
     _now=$(date +%s)
     for i in "${!APP_NAMES[@]}"; do
         _last_launch[$i]=$_now
-        _was_running[$i]="true"
+        _was_running[$i]="true"   # anggap sudah running setelah startup
     done
 
-    # Cooldown = LAUNCH_DELAY + 30 detik buffer startup app
-    local _COOLDOWN=$(( LAUNCH_DELAY + 30 ))
-    [[ $_COOLDOWN -lt 30 ]] && _COOLDOWN=30
+    # Cooldown setelah relaunch = waktu startup app (minimal 15 detik)
+    local _COOLDOWN=$(( LAUNCH_DELAY + 15 ))
+    [[ $_COOLDOWN -lt 15 ]] && _COOLDOWN=15
 
-    echo -e "${G}  [✓] Monitoring aktif...${N}"
-    echo -e "${D}  Cooldown setelah launch: ${_COOLDOWN}s${N}"
+    echo -e "${G}  [✓] Monitoring aktif — deteksi FC instan${N}"
     echo ""
 
-    while true; do
-        sleep $(( CHECK_INTERVAL * 60 ))
+    while [[ "$_STOP" != "true" ]]; do
+        sleep "$_CHECK_SEC"
+        [[ "$_STOP" == "true" ]] && break
 
         _now=$(date +%s)
-        echo -e "${D}  [~] Cek status — $(date '+%H:%M:%S')${N}"
 
         for i in "${!APP_NAMES[@]}"; do
             local _pkg="${APP_PKGS[$i]}"
@@ -801,9 +810,8 @@ menu_run() {
 
             local _elapsed=$(( _now - ${_last_launch[$i]:-0} ))
 
-            # Masih cooldown setelah launch → skip
+            # Masih dalam cooldown setelah (re)launch → skip dulu
             if [[ $_elapsed -lt $_COOLDOWN ]]; then
-                echo -e "  ${D}[cooldown] ${APP_NAMES[$i]} (${_elapsed}s < ${_COOLDOWN}s)${N}"
                 continue
             fi
 
@@ -811,29 +819,32 @@ menu_run() {
             is_running "$_pkg" && _running_now="true" || _running_now="false"
 
             if [[ "$_running_now" == "true" ]]; then
-                echo -e "  ${G}[OK]${N} ${W}${APP_NAMES[$i]}${N} ${D}running${N}"
+                # App running normal — update state
+                if [[ "${_was_running[$i]}" != "true" ]]; then
+                    echo -e "  ${G}[OK]${N}  ${W}${APP_NAMES[$i]}${N} ${D}sudah running kembali${N}"
+                fi
                 _was_running[$i]="true"
             else
                 if [[ "${_was_running[$i]}" == "true" ]]; then
-                    # Sebelumnya running → sekarang tidak → FC nyata
+                    # Barusan running → sekarang tidak → FC / ditutup!
                     _fc_total=$((_fc_total + 1))
-                    echo -e "${Y}  [FC#${_fc_total}]${N} ${W}${APP_NAMES[$i]}${N} ${D}[${APP_OWNERS[$i]:-—}]${N} ${R}FC!${N} → relaunch..."
-                    echo -e "        ${D}$(date '+%H:%M:%S')${N}"
+                    echo -e "${Y}  [FC#${_fc_total}]${N} ${W}${APP_NAMES[$i]}${N} ${C}[${APP_OWNERS[$i]:-—}]${N} ${R}keluar!${N} → relaunch sekarang..."
+                    echo -e "       ${D}$(date '+%H:%M:%S')${N}"
                     _launch_one "$i"
                     _last_launch[$i]=$(date +%s)
                     _was_running[$i]="wait"
+                    log_write "FC relaunch: ${APP_NAMES[$i]} (FC#${_fc_total})"
                 elif [[ "${_was_running[$i]}" == "wait" ]]; then
-                    # Masih belum running setelah relaunch → coba lagi
+                    # Sudah direlaunch tapi belum running → coba lagi setelah cooldown
                     echo -e "${R}  [retry]${N} ${W}${APP_NAMES[$i]}${N} belum running → coba lagi..."
                     _launch_one "$i"
                     _last_launch[$i]=$(date +%s)
-                else
-                    echo -e "  ${D}[FC]${N} ${W}${APP_NAMES[$i]}${N} ${D}tidak running${N}"
                 fi
             fi
         done
-        echo ""
     done
+
+    enter
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -1049,7 +1060,7 @@ menu_settings() {
         printf "  ${D}%-22s${N}  %s\n"  "Mode Launch"     "${W}${LAUNCH_MODE}${N}"
         printf "  ${D}%-22s${N}  %b\n"  "Auto Rejoin FC" \
             "$([[ "$AUTO_REJOIN" == "true" ]] && echo "${G}ON${N}" || echo "${R}OFF${N}")"
-        printf "  ${D}%-22s${N}  %s\n"  "Interval Cek FC" "${W}${CHECK_INTERVAL} menit${N}"
+        printf "  ${D}%-22s${N}  %s\n"  "Interval Cek FC" "${W}${CHECK_INTERVAL} detik${N}"
         printf "  ${D}%-22s${N}  %s\n"  "Jumlah App"      "${W}${#APP_NAMES[@]}${N}"
         printf "  ${D}%-22s${N}  %s\n"  "Terminal"        "${D}${TW}x${TH}${N}"
         sep
@@ -1058,7 +1069,7 @@ menu_settings() {
         echo -e "  ${W}[2]${N}  Ubah Launch Delay"
         echo -e "  ${W}[3]${N}  Ganti Mode Launch"
         echo -e "  ${W}[4]${N}  Toggle Auto Rejoin FC"
-        echo -e "  ${W}[5]${N}  Ubah Interval Cek FC"
+        echo -e "  ${W}[5]${N}  Ubah Interval Cek FC ${D}(detik)${N}"
         echo -e "  ${W}[6]${N}  Lihat Log"
         echo -e "  ${W}[7]${N}  Update dari GitHub"
         echo -e "  ${W}[0]${N}  Kembali"
@@ -1074,7 +1085,7 @@ menu_settings() {
                echo -e "${G}  Mode: $LAUNCH_MODE${N}"; save_config; sleep 1 ;;
             4) [[ "$AUTO_REJOIN" == "true" ]] && AUTO_REJOIN=false || AUTO_REJOIN=true
                echo -e "${G}  Auto Rejoin FC: $AUTO_REJOIN${N}"; save_config; sleep 1 ;;
-            5) echo -ne "  Interval (menit) → "; read -r _i
+            5) echo -ne "  Interval cek (detik, default 3) → "; read -r _i
                [[ "$_i" =~ ^[0-9]+$ ]] && CHECK_INTERVAL="$_i"; save_config ;;
             6) clr; banner; hdr "LOG"
                if [[ -f "$LOG_FILE" ]]; then
@@ -1135,7 +1146,7 @@ menu_about() {
     echo -e "  ${G}✓${N}  Deep Link dengan Owner & Judul"
     echo -e "  ${G}✓${N}  Setup konfigurasi (nama, delay, mode)"
     echo -e "  ${G}✓${N}  Launch sequential / parallel tanpa popup"
-    echo -e "  ${G}✓${N}  Auto Rejoin HANYA saat Force Close"
+    echo -e "  ${G}✓${N}  Auto Rejoin INSTAN saat app Force Close / ditutup"
     echo -e "  ${G}✓${N}  List Package khusus Roblox"
     echo -e "  ${G}✓${N}  Clear cache, Package Manager"
     echo -e "  ${G}✓${N}  Self-update dari GitHub"
