@@ -1,0 +1,67 @@
+#!/bin/bash
+# ╔══════════════════════════════════════════════════════════╗
+# ║         W A Y Y  T O O L B O X  — Setup                 ║
+# ║   Jalankan sekali untuk setup environment Termux         ║
+# ╚══════════════════════════════════════════════════════════╝
+#
+# CARA PAKAI (seperti repo Dodirebex123):
+#   . <(curl https://raw.githubusercontent.com/Wayy1702/mytoolbox/main/setup)
+# ATAU:
+#   bash <(curl -sL https://raw.githubusercontent.com/Wayy1702/mytoolbox/main/setup)
+
+REPO="https://raw.githubusercontent.com/Wayy1702/mytoolbox/main"
+SCRIPT_NAME="mytoolbox.sh"
+DEST="/data/data/com.termux/files/home/mytoolbox.sh"
+BIN="/data/data/com.termux/files/usr/bin/toolbox"
+
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'
+C='\033[0;36m'; M='\033[0;35m'; N='\033[0m'
+
+echo ""
+echo -e "${M}╔══════════════════════════════════════╗${N}"
+echo -e "${M}║   W A Y Y  T O O L B O X  v3.0      ║${N}"
+echo -e "${M}║   Setup Environment — Termux         ║${N}"
+echo -e "${M}╚══════════════════════════════════════╝${N}"
+echo ""
+
+# ── 1. Setup storage ────────────────────────────────────────
+cd
+if [ -e "/data/data/com.termux/files/home/storage" ]; then
+    rm -rf /data/data/com.termux/files/home/storage
+fi
+termux-setup-storage
+
+# ── 2. Update & upgrade ─────────────────────────────────────
+echo -e "${C}[1/4] Update & upgrade packages...${N}"
+yes | pkg update
+yes | pkg upgrade
+
+# ── 3. Install dependencies ─────────────────────────────────
+echo -e "${C}[2/4] Install dependencies...${N}"
+yes | pkg install curl wget termux-tools
+
+# ── 4. Download WAYY TOOLBOX ────────────────────────────────
+echo -e "${C}[3/4] Download WAYY TOOLBOX...${N}"
+curl -Ls "$REPO/$SCRIPT_NAME" -o "$DEST"
+chmod +x "$DEST"
+echo -e "    ${G}[✓] $SCRIPT_NAME didownload${N}"
+
+# ── 5. Buat command global 'toolbox' ────────────────────────
+echo -e "${C}[4/4] Buat command 'toolbox'...${N}"
+cat > "$BIN" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+exec bash "$DEST" "\$@"
+EOF
+chmod +x "$BIN"
+echo -e "    ${G}[✓] Command 'toolbox' siap${N}"
+
+echo ""
+echo -e "${G}╔══════════════════════════════════════╗${N}"
+echo -e "${G}║  ✓  Setup Selesai!                   ║${N}"
+echo -e "${G}╚══════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}toolbox${N}          — jalankan dari mana saja"
+echo -e "  ${Y}bash ~/mytoolbox.sh${N} — jalankan langsung"
+echo ""
+echo -e "${M}[→] Ketik 'toolbox' untuk mulai!${N}"
+echo ""
